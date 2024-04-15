@@ -1,2 +1,22 @@
-# suid-container
-Ejudge suid-container only (modified version)
+# Контейнер изолированного запуска
+
+Модифицированная версия контейнера для запуска недоверенных программ, написанная А.Черновым для тестирующей системы [Ejudge](https://ejudge.ru).
+
+## Возможности
+
+1. С помощью seccomp позволяет фильтровать системные вызовы (fork, exec, clone, unshare, memfd ...).
+2. С помощью cgoup и namespaces умеет отсекать программы по времени и памяти.
+
+## Инсталляция
+
+Для установки клонируйте репозиторий и запустите установочный скрипт *auto.sh* от пользователя **root**:
+
+```console
+$ git clone https://github.com/EJudge-CMS/suid-container
+$ chmod +x auto.sh
+$ sudo ./auto.sh
+```
+
+## Использование
+
+Создайте папку, поместите в неё вашу программу в скомпилированном виде. Далее запустите скомпилированную программу _suid-container_ в формате, указанном на [сайте](https://ejudge.ru/wiki/index.php/Ej-suid-container).
