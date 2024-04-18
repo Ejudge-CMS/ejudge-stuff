@@ -9,14 +9,43 @@
 
 ## Инсталляция
 
-Для установки клонируйте репозиторий и запустите установочный скрипт *auto.sh* от пользователя **root**:
-
-```console
-$ git clone https://github.com/EJudge-CMS/suid-container
-$ chmod +x auto.sh
-$ sudo ./auto.sh
-```
+Установите и скомпилируйте файл **suid-container.c** с заголовком **defines.h**.
 
 ## Использование
 
-Создайте папку, поместите в неё вашу программу в скомпилированном виде. Далее запустите скомпилированную программу _suid-container_ в формате, указанном на [сайте](https://ejudge.ru/wiki/index.php/Ej-suid-container).
+См. [инструкцию](https://ejudge.ru/wiki/index.php/Ej-suid-container).
+
+## Дополнения
+
+Также написан заголовочный файл **runtwice_seccomp.h**, предоставляющих возможность фильтрации системных вызовов. Для использования необходимо _отключить_ фильтрацию системных вызовов во встроенном контейнере, подключить заголовочный файл после всех _#include_, в начале функции main написать
+
+```c++
+int main() {
+    setup_filter();
+    snprintf(program_name, sizeof(program_name), argv[1]);
+    struct sock_filter filter[] = seccomp_fiter(program_name);
+    struct sock_fprog prog = seccomp_prog(filter);
+    
+    // etc ...
+}
+```
+
+если вы хотите запустить решение:
+
+```c++
+// ...
+
+int pid = fork();
+if (!pid) {
+    install_filter(prog);
+    execve(program_name, NULL, NULL);
+}
+
+int status;
+waitpid(pid, &status, 0);
+if (status) {
+    // your program has done something wrong ...
+}
+
+// ...
+```

@@ -1,3 +1,40 @@
+#include <linux/sched.h>
+#include <stdio.h>
+#include <string.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <asm/unistd.h>
+#include <signal.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <sys/mount.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <sys/resource.h>
+#include <grp.h>
+#include <sys/signalfd.h>
+#include <sys/timerfd.h>
+#include <sys/epoll.h>
+#include <sys/time.h>
+#include <ctype.h>
+#include <sys/msg.h>
+#include <sys/sem.h>
+#include <sys/shm.h>
+#include <sys/prctl.h>
+#include <asm/unistd.h>
+#include <asm/param.h>
+#include <linux/audit.h>
+#include <linux/seccomp.h>
+#include <linux/filter.h>
+#include <stddef.h>
+#include <sys/socket.h>
+#include <netinet/ip.h>
+#include <net/if.h>
+#include <arpa/inet.h>
+
 #define PRIMARY_USER "judge"
 #define PRIMARY_GROUP PRIMARY_USER
 #define EXEC_USER "judgeexec"
