@@ -14,6 +14,7 @@
 #include <linux/filter.h>
 #include <stddef.h>
 #include <linux/limits.h>
+#include <stdint.h>
 
 static char program_name[PATH_MAX] = "";
 
