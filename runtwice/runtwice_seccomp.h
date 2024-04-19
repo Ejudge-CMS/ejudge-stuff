@@ -5,35 +5,15 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <asm/unistd.h>
-#include <signal.h>
-#include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/mount.h>
 #include <fcntl.h>
 #include <stdarg.h>
-#include <sys/stat.h>
-#include <dirent.h>
-#include <sys/resource.h>
-#include <grp.h>
-#include <sys/signalfd.h>
-#include <sys/timerfd.h>
-#include <sys/epoll.h>
-#include <sys/time.h>
-#include <ctype.h>
-#include <sys/msg.h>
-#include <sys/sem.h>
-#include <sys/shm.h>
 #include <sys/prctl.h>
-#include <asm/unistd.h>
-#include <asm/param.h>
-#include <linux/audit.h>
 #include <linux/seccomp.h>
 #include <linux/filter.h>
 #include <stddef.h>
-#include <sys/socket.h>
-#include <netinet/ip.h>
-#include <net/if.h>
-#include <arpa/inet.h>
+#include <linux/limits.h>
 
 static char program_name[PATH_MAX] = "";
 
@@ -64,12 +44,20 @@ static char program_name[PATH_MAX] = "";
     /* 15 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_unshare, 0, 1), \
     /* 16 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS), \
  \
-    /* 17 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_execve, 0, 3), \
-    /* 18 */ BPF_STMT(BPF_LD+BPF_W+BPF_ABS, (offsetof(struct seccomp_data, args[0]))), \
-    /* 19 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, (uintptr_t) prog_name, 1, 0), \
-    /* 20 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS), \
+    /* 17 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_creat, 0, 1), \
+    /* 18 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS), \
  \
-    /* 21 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW), \
+    /* 19 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_execve, 0, 3), \
+    /* 20 */ BPF_STMT(BPF_LD+BPF_W+BPF_ABS, (offsetof(struct seccomp_data, args[0]))), \
+    /* 21 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, (uintptr_t) prog_name, 1, 0), \
+    /* 22 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS), \
+ \
+    /* 23 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_openat, 0, 3), \
+    /* 24 */ BPF_STMT(BPF_LD+BPF_W+BPF_ABS, (offsetof(struct seccomp_data, args[2]))), \
+    /* 25 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, O_RDONLY|O_CLOEXEC, 1, 0), \
+    /* 26 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS), \
+ \
+    /* 27 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW), \
 }
 
 #define seccomp_prog(filter) { \
