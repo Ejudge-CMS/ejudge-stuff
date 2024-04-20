@@ -55,10 +55,11 @@ static char program_name[PATH_MAX] = "";
  \
     /* 23 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_openat, 0, 3), \
     /* 24 */ BPF_STMT(BPF_LD+BPF_W+BPF_ABS, (offsetof(struct seccomp_data, args[2]))), \
-    /* 25 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, O_RDONLY|O_CLOEXEC, 1, 0), \
-    /* 26 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS), \
+    /* 25 */ BPF_STMT(BPF_ALU+BPF_AND+BPF_K, 07), \
+    /* 26 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, 0, 1, 0), \
+    /* 27 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS), \
  \
-    /* 27 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW), \
+    /* 28 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW), \
 }
 
 #define seccomp_prog(filter) { \
