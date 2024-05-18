@@ -53,7 +53,7 @@ static char program_name[PATH_MAX] = "";
     /* 21 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, (uintptr_t) prog_name, 1, 0), \
     /* 22 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS), \
  \
-    /* 23 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_openat, 0, 3), \
+    /* 23 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_openat, 0, 4), \
     /* 24 */ BPF_STMT(BPF_LD+BPF_W+BPF_ABS, (offsetof(struct seccomp_data, args[2]))), \
     /* 25 */ BPF_STMT(BPF_ALU+BPF_AND+BPF_K, 07), \
     /* 26 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, 0, 1, 0), \
