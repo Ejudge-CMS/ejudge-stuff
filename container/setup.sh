@@ -1,5 +1,7 @@
 #!/usr/bin/bash
 
+apt install gcc
+
 BASE=$(whiptail --title  "Base user" --inputbox  "What is your base user's name?" 10 60 3>&1 1>&2 2>&3)
 mkdir -p /opt/judge/bin
 chown -R $BASE:$BASE /opt/judge
