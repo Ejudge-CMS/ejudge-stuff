@@ -20,9 +20,13 @@
 #include <string.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <asm/unistd.h>
+#include <signal.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/mount.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <sys/stat.h>
 #include <dirent.h>
@@ -36,7 +40,17 @@
 #include <sys/msg.h>
 #include <sys/sem.h>
 #include <sys/shm.h>
+#include <sys/prctl.h>
+#include <asm/unistd.h>
 #include <asm/param.h>
+#include <linux/audit.h>
+#include <linux/seccomp.h>
+#include <linux/filter.h>
+#include <stddef.h>
+#include <sys/socket.h>
+#include <netinet/ip.h>
+#include <net/if.h>
+#include <arpa/inet.h>
 
 #define PRIMARY_USER "judge"
 #define PRIMARY_GROUP PRIMARY_USER
@@ -44,12 +58,13 @@
 #define EXEC_USER "exec"
 #define EXEC_GROUP EXEC_USER
 
-#define JUDGE_PREFIX_DIR "/opt/judge"
-#define JUDGE_CONTAINER_DIR "/container"
+#define COMPILE_USER "compile"
+#define COMPILE_GROUP COMPILE_USER
+
+#define CONTAINER_DIR "/opt/judge/container"
 
 static char const sandbox_dir[] = "/sandbox";
 static char const alternatives_dir[] = "/etc/alternatives";
-static char const compile_dir[] = "/home/judges/compile";
 static char const etc_java_dir[] = "/etc/java";
 
 static char safe_dir_path[PATH_MAX];
@@ -74,27 +89,47 @@ static int response_fd = 2;
 static char *log_s = NULL;
 static size_t log_z = 0;
 static FILE *log_f = NULL;
+static int control_socket_fd = -1;
 
+static int enable_ipc_ns = 1;
+static int enable_net_ns = 1;
+static int enable_mount_ns = 1;
 static int enable_proc = 0;
 static int enable_sys = 0;
 static int enable_dev = 0;
 static int enable_var = 0;
 static int enable_etc = 0;
+static int enable_sandbox_dir = 1;
 static int enable_home = 0;
+static int enable_prc_count = 0;
+static int enable_ipc_count = 0;
 static int enable_subdir_mode = 0;
 static int enable_run = 0;
+static int enable_loopback = 0;
 static int enable_vm_limit = 1;
 static int enable_mem_limit_detect = 0;
 static int enable_security_detect = 0;
+
+static int enable_seccomp = 1;
+static int enable_sys_execve = 0;
+static int enable_sys_fork = 0;
+static int enable_sys_memfd = 0;
+static int enable_sys_unshare = 0;
+static int enable_fd_open = 0;
 
 static char *working_dir = NULL;
 static char *working_dir_parent = NULL;
 static char *working_dir_name = NULL;
 
+static int bash_mode = 0;
+
+static int exec_user_serial = 0;
 static int exec_uid = -1;
 static int exec_gid = -1;
 static int primary_uid = -1;
 static int primary_gid = -1;
+static int compile_uid = -1;
+static int compile_gid = -1;
 static int slave_uid = -1;
 static int slave_gid = -1;
 
@@ -112,6 +147,7 @@ static int stderr_fd = -1;
 static char *start_program_name = NULL;
 static int stdin_external_fd = -1;
 static int stdout_external_fd = -1;
+static char *language_name = NULL;
 
 enum { DEFAULT_LIMIT_VM_SIZE = 67108864 };
 enum { DEFAULT_LIMIT_CPU_TIME_MS = 1000 };
@@ -200,12 +236,31 @@ get_user_ids(void)
     // don't use getpwnam because it depends on PAM, etc
     char exec_user_str[64];
     char compile_user_str[64];
-    if (snprintf(exec_user_str, sizeof(exec_user_str), "%s", EXEC_USER) >= sizeof(exec_user_str))
-        ffatal("invalid user %s", EXEC_USER);
+    if (exec_user_serial > 0) {
+        if (snprintf(exec_user_str, sizeof(exec_user_str), "%s%d", EXEC_USER, exec_user_serial) >= sizeof(exec_user_str))
+            ffatal("invalid user %s%d", EXEC_USER, exec_user_serial);
+        if (snprintf(compile_user_str, sizeof(compile_user_str), "%s%d", COMPILE_USER, exec_user_serial) >= sizeof(compile_user_str))
+            ffatal("invalid user %s%d", COMPILE_USER, exec_user_serial);
+    } else {
+        if (snprintf(exec_user_str, sizeof(exec_user_str), "%s", EXEC_USER) >= sizeof(exec_user_str))
+            ffatal("invalid user %s", EXEC_USER);
+        if (snprintf(compile_user_str, sizeof(compile_user_str), "%s", COMPILE_USER) >= sizeof(compile_user_str))
+            ffatal("invalid user %s", COMPILE_USER);
+    }
     char exec_group_str[64];
     char compile_group_str[64];
-    if (snprintf(exec_group_str, sizeof(exec_group_str), "%s", EXEC_GROUP) >= sizeof(exec_group_str))
-        ffatal("invalid group %s", EXEC_GROUP);
+    if (exec_user_serial > 0) {
+        if (snprintf(exec_group_str, sizeof(exec_group_str), "%s%d", EXEC_GROUP, exec_user_serial) >= sizeof(exec_group_str))
+            ffatal("invalid group %s%d", EXEC_GROUP, exec_user_serial);
+        if (snprintf(compile_group_str, sizeof(compile_group_str), "%s%d", COMPILE_GROUP, exec_user_serial) >= sizeof(compile_group_str))
+            ffatal("invalid group %s%d", COMPILE_GROUP, exec_user_serial);
+    } else {
+        if (snprintf(exec_group_str, sizeof(exec_group_str), "%s", EXEC_GROUP) >= sizeof(exec_group_str))
+            ffatal("invalid group %s", EXEC_GROUP);
+        if (snprintf(compile_group_str, sizeof(compile_group_str), "%s", COMPILE_GROUP) >= sizeof(compile_group_str))
+            ffatal("invalid group %s", COMPILE_GROUP);
+    }
+
     FILE *f = fopen("/etc/passwd", "r");
     if (!f) ffatal("cannot open /etc/passwd: %s", strerror(errno));
     char buf[4096];
@@ -226,6 +281,7 @@ get_user_ids(void)
         int *dest_uid = NULL;
         if (!strcmp(user_name, exec_user_str)) dest_uid = &exec_uid;
         else if (!strcmp(user_name, PRIMARY_USER)) dest_uid = &primary_uid;
+        else if (!strcmp(user_name, compile_user_str)) dest_uid = &compile_uid;
         if (dest_uid) {
             char *eptr = NULL;
             errno = 0;
@@ -260,6 +316,7 @@ get_user_ids(void)
         int *dest_gid = NULL;
         if (!strcmp(group_name, exec_group_str)) dest_gid = &exec_gid;
         else if (!strcmp(group_name, PRIMARY_GROUP)) dest_gid = &primary_gid;
+        else if (!strcmp(group_name, compile_group_str)) dest_gid = &compile_gid;
         if (dest_gid) {
             char *eptr = NULL;
             errno = 0;
@@ -477,25 +534,27 @@ reconfigure_fs(void)
         }
     }
 
-    if (mkdir(sandbox_dir, 0755) < 0 && errno != EEXIST) {
-        ffatal("failed to create '%s': %s", sandbox_dir, strerror(errno));
-    }
+    if (enable_sandbox_dir) {
+        if (mkdir(sandbox_dir, 0755) < 0 && errno != EEXIST) {
+            ffatal("failed to create '%s': %s", sandbox_dir, strerror(errno));
+        }
 
-    if (working_dir_parent && *working_dir_parent) {
-        if ((r = mount(working_dir_parent, sandbox_dir, NULL, MS_BIND, NULL)) < 0) {
-            ffatal("failed to mount '%s' to %s: %s", working_dir_parent, sandbox_dir, strerror(errno));
-        }
-    } else if (working_dir && *working_dir) {
-        if ((r = mount(working_dir, sandbox_dir, NULL, MS_BIND, NULL)) < 0) {
-            ffatal("failed to mount '%s' to %s: %s", working_dir, sandbox_dir, strerror(errno));
-        }
-    } else {
-        char wd[PATH_MAX];
-        if (!getcwd(wd, sizeof(wd))) {
-            ffatal("failed to get current dir: %s", strerror(errno));
-        }
-        if ((r = mount(wd, sandbox_dir, NULL, MS_BIND, NULL)) < 0) {
-            ffatal("failed to mount %s: %s", sandbox_dir, strerror(errno));
+        if (working_dir_parent && *working_dir_parent) {
+            if ((r = mount(working_dir_parent, sandbox_dir, NULL, MS_BIND, NULL)) < 0) {
+                ffatal("failed to mount '%s' to %s: %s", working_dir_parent, sandbox_dir, strerror(errno));
+            }
+        } else if (working_dir && *working_dir) {
+            if ((r = mount(working_dir, sandbox_dir, NULL, MS_BIND, NULL)) < 0) {
+                ffatal("failed to mount '%s' to %s: %s", working_dir, sandbox_dir, strerror(errno));
+            }
+        } else {
+            char wd[PATH_MAX];
+            if (!getcwd(wd, sizeof(wd))) {
+                ffatal("failed to get current dir: %s", strerror(errno));
+            }
+            if ((r = mount(wd, sandbox_dir, NULL, MS_BIND, NULL)) < 0) {
+                ffatal("failed to mount %s: %s", sandbox_dir, strerror(errno));
+            }
         }
     }
 
@@ -662,6 +721,44 @@ reconfigure_fs(void)
 
     free(mi);
     free(mnt_s);
+}
+
+static void
+net_interface_up(
+        const unsigned char *ifname,
+        const unsigned char *ip,
+        const unsigned char *netmask)
+{
+    int sfd = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (sfd < 0) {
+        ffatal("socket() failed: %s", strerror(errno));
+    }
+
+    struct ifreq ifr = {};
+    strncpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
+
+    struct sockaddr_in sa = {};
+    sa.sin_family = AF_INET;
+    sa.sin_port = 0;
+    sa.sin_addr.s_addr = inet_addr(ip);
+    memcpy(&ifr.ifr_addr, &sa, sizeof(sa));
+
+    if (ioctl(sfd, SIOCSIFADDR, &ifr) < 0) {
+        ffatal("cannot set ip addr '%s' on '%s'", ip, ifname);
+    }
+
+    sa.sin_addr.s_addr = inet_addr(netmask);
+    memcpy(&ifr.ifr_addr, &sa, sizeof(sa));
+    if (ioctl(sfd, SIOCSIFNETMASK, &ifr) < 0) {
+        ffatal("cannot set netmask '%s' on '%s'", netmask, ifname);
+    }
+
+    ifr.ifr_flags |= IFF_UP | IFF_BROADCAST | IFF_RUNNING | IFF_MULTICAST;
+    if (ioctl(sfd, SIOCSIFFLAGS, &ifr) < 0) {
+        ffatal("cannot set flags on '%s'", ifname);
+    }
+
+    close(sfd);
 }
 
 static int
@@ -1230,6 +1327,187 @@ read_cgroup_stats(struct CGroupStat *ps)
     }
 }
 
+static struct sock_filter seccomp_filter_default[] =
+{
+    // load syscall number
+    /*  0 */ BPF_STMT(BPF_LD+BPF_W+BPF_ABS, (offsetof(struct seccomp_data, nr))),
+
+    // blacklist fork-like syscalls
+#if defined __NR_fork
+    /*  1 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_fork, 0, 1),
+    /*  2 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS),
+#else
+    /*  1 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+    /*  2 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+#endif
+#if defined __NR_vfork
+    /*  3 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_vfork, 0, 1),
+    /*  4 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS),
+#else
+    /*  3 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+    /*  4 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+#endif
+#if defined __NR_clone
+    /*  5 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_clone, 0, 1),
+    /*  6 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS),
+#else
+    /*  5 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+    /*  6 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+#endif
+#if defined __NR_clone3
+    /*  7 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_clone3, 0, 1),
+    /*  8 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS),
+#else
+    /*  7 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+    /*  8 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+#endif
+
+    // blacklist exec-like syscalls
+#if defined __NR_execveat
+    /*  9 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_execveat, 0, 1),
+    /* 10 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS),
+#else
+    /*  9 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+    /* 10 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+#endif
+
+    // we have to allow initial execve into a starting program
+    /* 11 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_execve, 0, 3),
+    /* 12 */ BPF_STMT(BPF_LD+BPF_W+BPF_ABS, (offsetof(struct seccomp_data, args[0]))),
+    /* 13 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, 0, 1, 0), // patched in tune_seccomp
+    /* 14 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS),
+
+    // blacklist memfd_create
+#if defined __NR_memfd_create
+    /* 15 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_memfd_create, 0, 1),
+    /* 16 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS),
+#else
+    /* 15 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+    /* 16 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+#endif
+
+    // blacklist unshare
+#if defined __NR_unshare
+    /* 17 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_unshare, 0, 1),
+    /* 18 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS),
+#else
+    /* 17 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+    /* 18 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+#endif
+
+    // blacklist creat
+#if defined __NR_creat
+    /* 19 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_creat, 0, 1),
+    /* 20 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS),
+#else
+    /* 19 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+    /* 20 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+#endif
+
+    // blacklist non-readonly openat
+#if defined __NR_openat
+    /* 23 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_openat, 0, 3),
+    /* 24 */ BPF_STMT(BPF_LD+BPF_W+BPF_ABS, (offsetof(struct seccomp_data, args[2]))),
+    /* 25 */ BPF_STMT(BPF_ALU+BPF_AND+BPF_K, 07),
+    /* 26 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, 0, 1, 0),
+    /* 27 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS),
+#else
+    /* 23 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+    /* 24 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+    /* 25 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+    /* 26 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+    /* 27 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+#endif
+
+    // blacklist non-readonly open
+#if defined __NR_open
+    /* 28 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_open, 0, 3),
+    /* 29 */ BPF_STMT(BPF_LD+BPF_W+BPF_ABS, (offsetof(struct seccomp_data, args[2]))),
+    /* 30 */ BPF_STMT(BPF_ALU+BPF_AND+BPF_K, 07),
+    /* 31 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, 0, 1, 0),
+    /* 32 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS),
+#else
+    /* 28 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+    /* 29 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+    /* 30 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+    /* 31 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+    /* 32 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+#endif
+
+    // allow remaining
+    /* 33 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW),
+};
+
+static __attribute__((unused)) struct sock_fprog seccomp_prog_default =
+{
+    .len = (unsigned short)(sizeof(seccomp_filter_default) / sizeof(seccomp_filter_default[0])),
+    .filter = seccomp_filter_default,
+};
+
+static const struct sock_fprog *seccomp_prog_active = NULL;
+
+static void
+tune_seccomp()
+{
+    static struct sock_filter nop[] =
+    {
+        BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+    };
+
+    if (!enable_seccomp) return;
+
+    seccomp_prog_active = &seccomp_prog_default;
+    {
+        struct sock_filter patch1[] =
+        {
+            BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, (uintptr_t) start_program, 1, 0),
+        };
+        seccomp_filter_default[13] = patch1[0];  // FIXME: index may change!
+    }
+    if (enable_sys_fork) {
+        seccomp_filter_default[1] = nop[0];
+        seccomp_filter_default[2] = nop[0];
+        seccomp_filter_default[3] = nop[0];
+        seccomp_filter_default[4] = nop[0];
+        seccomp_filter_default[5] = nop[0];
+        seccomp_filter_default[6] = nop[0];
+        seccomp_filter_default[7] = nop[0];
+        seccomp_filter_default[8] = nop[0];
+    }
+    if (enable_sys_execve) {
+        seccomp_filter_default[9] = nop[0];
+        seccomp_filter_default[10] = nop[0];
+        seccomp_filter_default[11] = nop[0];
+        seccomp_filter_default[12] = nop[0];
+        seccomp_filter_default[13] = nop[0];
+        seccomp_filter_default[14] = nop[0];
+    }
+    if (enable_sys_memfd) {
+        seccomp_filter_default[15] = nop[0];
+        seccomp_filter_default[16] = nop[0];
+    }
+    if (enable_sys_unshare) {
+        seccomp_filter_default[17] = nop[0];
+        seccomp_filter_default[18] = nop[0];
+    }
+    if (enable_fd_open) {
+        seccomp_filter_default[19] = nop[0];
+        seccomp_filter_default[20] = nop[0];
+        seccomp_filter_default[21] = nop[0];
+        seccomp_filter_default[22] = nop[0];
+        seccomp_filter_default[23] = nop[0];
+        seccomp_filter_default[24] = nop[0];
+        seccomp_filter_default[25] = nop[0];
+        seccomp_filter_default[26] = nop[0];
+        seccomp_filter_default[27] = nop[0];
+        seccomp_filter_default[28] = nop[0];
+        seccomp_filter_default[29] = nop[0];
+        seccomp_filter_default[30] = nop[0];
+        seccomp_filter_default[31] = nop[0];
+        seccomp_filter_default[32] = nop[0];
+    }
+}
+
 static void
 set_cgroup_rss_limit(void)
 {
@@ -1261,6 +1539,98 @@ set_cgroup_rss_limit(void)
             ffatal("path too long");
         }
         write_buf_to_file_if_exists(path, data, len);
+    }
+}
+
+static void
+apply_language_profiles(void)
+{
+    if (!language_name || !*language_name) return;
+
+    if (!strcmp(language_name, "javac7")
+        || !strcmp(language_name, "javac")
+        || !strcmp(language_name, "kotlin")
+        || !strcmp(language_name, "scala")) {
+        enable_sys_fork = 1;
+        enable_sys_execve = 1;
+        enable_proc = 1;
+        limit_vm_size = -1;     // VM limit set by environment var
+        limit_stack_size = 1024 * 1024; // 1M
+        limit_processes = 40;
+    } else if (!strcmp(language_name, "mcs") || !strcmp(language_name, "vbnc")
+               || !strcmp(language_name, "pasabc-linux")) {
+        enable_sys_fork = 1;
+        enable_sys_execve = 1;
+        enable_proc = 1;
+        limit_stack_size = 1024 * 1024; // 1M
+        if (limit_vm_size > 0 && limit_rss_size <= 0) {
+            limit_rss_size = limit_vm_size;
+            limit_vm_size = -1;
+        }
+    } else if (!strcmp(language_name, "pypy") || !strcmp(language_name, "pypy3")) {
+        enable_proc = 1;
+    } else if (!strcmp(language_name, "gcc-vg") || !strcmp(language_name, "g++-vg")) {
+        enable_sys_fork = 1;
+        enable_sys_execve = 1;
+        enable_proc = 1;
+        limit_vm_size = -1;
+    } else if (!strcmp(language_name, "dotnet-cs") || !strcmp(language_name, "dotnet-vb")) {
+        enable_sys_fork = 1;
+        enable_sys_execve = 1;
+        enable_sys_memfd = 1;
+        enable_proc = 1;
+        limit_processes = 40;
+        limit_stack_size = 1024 * 1024; // 1M
+        if (limit_vm_size > 0 && limit_rss_size <= 0) {
+            limit_rss_size = limit_vm_size;
+            limit_vm_size = -1;
+        }
+    } else if (!strcmp(language_name, "make")) {
+        enable_sys_fork = 1;
+        enable_sys_execve = 1;
+        enable_proc = 1;
+    } else if (!strcmp(language_name, "make-vg")) {
+        enable_sys_fork = 1;
+        enable_sys_execve = 1;
+        enable_proc = 1;
+        limit_vm_size = -1;
+    } else if (!strcmp(language_name, "gccgo")) {
+        enable_sys_fork = 1;
+        enable_sys_execve = 1;
+        enable_proc = 1;
+        limit_processes = 20;
+        if (limit_vm_size > 0 && limit_rss_size <= 0) {
+            limit_rss_size = limit_vm_size;
+            limit_vm_size = -1;
+        }
+    } else if (!strcmp(language_name, "node")) {
+        enable_sys_fork = 1;
+        limit_processes = 20;
+        limit_stack_size = 1024 * 1024; // 1M
+        if (limit_vm_size > 0 && limit_rss_size <= 0) {
+            limit_rss_size = limit_vm_size;
+            limit_vm_size = -1;
+        }
+    } else if (!strcmp(language_name, "tsnode")) {
+        enable_sys_fork = 1;
+        enable_sys_execve = 1;
+        limit_processes = 20;
+        limit_stack_size = 1024 * 1024; // 1M
+        if (limit_vm_size > 0 && limit_rss_size <= 0) {
+            limit_rss_size = limit_vm_size;
+            limit_vm_size = -1;
+        }
+    } else if (!strcmp(language_name, "ruby")) {
+        enable_sys_fork = 1;
+        enable_sys_execve = 1;
+    } else if (!strcmp(language_name, "postgres")) {
+        enable_sys_fork = 1;
+        enable_sys_execve = 1;
+        enable_proc = 1;
+        enable_sys = 1;
+        enable_etc = 1;
+        enable_net_ns = 0;
+        limit_processes = 20;
     }
 }
 
@@ -1328,16 +1698,23 @@ extract_size(const char **ppos, int init_offset, const char *opt_name)
 /*
  * option specification:
  *   f<FD>  - set log file descriptor
+ *   mi     - disable IPC namespace
+ *   mn     - disable net namespace
+ *   mm     - disable mount namespace
  *   mP     - enable /proc filesystem
  *   mS     - enable /sys filesystem
  *   mv     - enable original /var filesystem
  *   me     - enable original /etc filesystem
+ *   ms     - disable bindind of working dir to /sandbox
  *   mh     - enable /home filesystem
+ *   mc     - enable orphaned process count
+ *   mI     - enable IPC count
  *   ma     - unlimited cpu time
  *   mb     - unlimited real time
  *   md     - enable /dev filesystem
  *   mD     - enable subdirectory mode
  *   mr     - preserve original /run directory
+ *   ml     - setup lo inteface inside the container
  *   mV     - explicitly disable setting of VM size limit
  *   mM     - enable memory limit error detection
  *   mE     - enable security violation detection
@@ -1361,7 +1738,15 @@ extract_size(const char **ppos, int init_offset, const char *opt_name)
  *   lR<Z>  - set RSS limit
  *   lf<Z>  - set file size limit
  *   lu<N>  - set user processes limit
-*/
+ *   ol<S>  - set programming language name
+ *   s0     - disable syscall filtering
+ *   se     - enable execve(at)
+ *   sf     - enable fork, vfork, clone, clone3
+ *   sm     - enable memfd_create
+ *   su     - enable unshare
+ *   cf<FD> - specify control socket fd
+ *   cu<N>  - specify ejcompile/ejexec serial (ejexec1, ejexec2...)
+ */
 
 int
 main(int argc, char *argv[])
@@ -1379,7 +1764,7 @@ main(int argc, char *argv[])
     signal(SIGCHLD, SIG_DFL);
     log_f = open_memstream(&log_s, &log_z);
 
-    snprintf(safe_dir_path, sizeof(safe_dir_path), "%s%s", JUDGE_PREFIX_DIR, JUDGE_CONTAINER_DIR);
+    snprintf(safe_dir_path, sizeof(safe_dir_path), "%s", CONTAINER_DIR);
 
     if (argc < 1) {
         flog("wrong number of arguments");
@@ -1406,14 +1791,32 @@ main(int argc, char *argv[])
                 }
                 response_fd = v;
                 opt = eptr;
+            } else if (*opt == 'm' && opt[1] == 'i') {
+                enable_ipc_ns = 0;
+                opt += 2;
+            } else if (*opt == 'm' && opt[1] == 'n') {
+                enable_net_ns = 0;
+                opt += 2;
+            } else if (*opt == 'm' && opt[1] == 'm') {
+                enable_mount_ns = 0;
+                opt += 2;
             } else if (*opt == 'm' && opt[1] == 'P') {
                 enable_proc = 1;
                 opt += 2;
             } else if (*opt == 'm' && opt[1] == 'S') {
                 enable_sys = 1;
                 opt += 2;
+            } else if (*opt == 'm' && opt[1] == 's') {
+                enable_sandbox_dir = 0;
+                opt += 2;
             } else if (*opt == 'm' && opt[1] == 'h') {
                 enable_home = 1;
+                opt += 2;
+            } else if (*opt == 'm' && opt[1] == 'c') {
+                enable_prc_count = 1;
+                opt += 2;
+            } else if (*opt == 'm' && opt[1] == 'I') {
+                enable_ipc_count = 1;
                 opt += 2;
             } else if (*opt == 'm' && opt[1] == 'a') {
                 limit_cpu_time_ms = -1;
@@ -1435,6 +1838,9 @@ main(int argc, char *argv[])
                 opt += 2;
             } else if (*opt == 'm' && opt[1] == 'r') {
                 enable_run = 1;
+                opt += 2;
+            } else if (*opt == 'm' && opt[1] == 'l') {
+                enable_loopback = 1;
                 opt += 2;
             } else if (*opt == 'm' && opt[1] == 'V') {
                 enable_vm_limit = 0;
@@ -1547,6 +1953,48 @@ main(int argc, char *argv[])
                 if (!v) v = -1;
                 limit_real_time_ms = v;
                 opt = eptr;
+            } else if (*opt == 's' && opt[1] == '0') {
+                enable_seccomp = 0;
+                opt += 2;
+            } else if (*opt == 's' && opt[1] == 'e') {
+                enable_sys_execve = 1;
+                opt += 2;
+            } else if (*opt == 's' && opt[1] == 'f') {
+                enable_sys_fork = 1;
+                opt += 2;
+            } else if (*opt == 's' && opt[1] == 'd') {
+                enable_fd_open = 1;
+                opt += 2;
+            } else if (*opt == 's' && opt[1] == 'm') {
+                enable_sys_memfd = 1;
+                opt += 2;
+            } else if (*opt == 's' && opt[1] == 'u') {
+                enable_sys_unshare = 1;
+                opt += 2;
+            } else if (*opt == 'o' && opt[1] == 'l') {
+                language_name = extract_string(&opt, 2, "ol");
+            } else if (*opt == 'c' && opt[1] == 'f') {
+                char *eptr = NULL;
+                errno = 0;
+                long v = strtol(opt + 2, &eptr, 10);
+                if (errno || eptr == opt + 2 || v < 0 || (int) v != v) {
+                    ffatal("invalid control socket fd");
+                }
+                struct stat stb;
+                if (fstat(v, &stb) < 0 || !S_ISSOCK(stb.st_mode)) {
+                    ffatal("invalid control socket fd");
+                }
+                control_socket_fd = v;
+                opt = eptr;
+            } else if (*opt == 'c' && opt[1] == 'u') {
+                char *eptr = NULL;
+                errno = 0;
+                long v = strtol(opt + 2, &eptr, 10);
+                if (errno || eptr == opt + 2 || v < 0 || (int) v != v) {
+                    ffatal("invalid user serial");
+                }
+                exec_user_serial = v;
+                opt = eptr;
             } else {
                 flog("invalid option: %s", opt);
                 fatal();
@@ -1565,15 +2013,12 @@ main(int argc, char *argv[])
 
     slave_uid = exec_uid;
     slave_gid = exec_gid;
-
-#ifndef ENABLE_ANY_USER
-    {
-        int self_uid = getuid();
-        if (self_uid != primary_uid && self_uid != 0) {
-            ffatal("not allowed");
-        }
+    int self_uid = getuid();
+    if (self_uid != primary_uid && self_uid != 0) {
+        ffatal("not allowed");
     }
-#endif
+
+    apply_language_profiles();
 
     if (enable_subdir_mode && working_dir && working_dir[0]) {
         working_dir_parent = strdup(working_dir);
@@ -1630,9 +2075,9 @@ main(int argc, char *argv[])
     create_cgroup();
 
     unsigned clone_flags = CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID | SIGCHLD;
-    clone_flags |= CLONE_NEWIPC;
-    clone_flags |= CLONE_NEWNET;
-    clone_flags |= CLONE_NEWNS;
+    if (enable_ipc_ns) clone_flags |= CLONE_NEWIPC;
+    if (enable_net_ns) clone_flags |= CLONE_NEWNET;
+    if (enable_mount_ns) clone_flags |= CLONE_NEWNS;
     clone_flags |= CLONE_NEWPID;
 
     pid_t tidptr = 0;
@@ -1646,11 +2091,21 @@ main(int argc, char *argv[])
     }
 
     if (!pid) {
-        reconfigure_fs();
+        if (enable_mount_ns) {
+            reconfigure_fs();
+        }
 
         sigset_t bs;
         sigemptyset(&bs); sigaddset(&bs, SIGCHLD);
         sigprocmask(SIG_BLOCK, &bs, NULL);
+
+        if (enable_loopback) {
+            net_interface_up("lo", "127.0.0.1", "255.0.0.0");
+        }
+
+        if (enable_seccomp) {
+            tune_seccomp();
+        }
 
         if (cgroup_v2_detected) {
             if (snprintf(cgroup_unified_path, sizeof(cgroup_unified_path), "%s/ejudge/%s", cgroup_path, cgroup_name) >= sizeof(cgroup_unified_path)) {
@@ -1689,16 +2144,27 @@ main(int argc, char *argv[])
                 close(response_fd);
                 response_fd = -1;
             }
-            move_to_cgroup();
-            // setpgid(0, 0);
-            if (setsid() < 0) fprintf(stderr, "setsid() failed: %s\n", strerror(errno));\
-            if (chdir(sandbox_dir) < 0) {
-                fprintf(stderr, "failed to change dir to %s: %s\n", sandbox_dir, strerror(errno));
-                _exit(127);
+            if (control_socket_fd >= 0) {
+                close(control_socket_fd);
+                control_socket_fd = -1;
             }
-            if (working_dir_name && *working_dir_name) {
-                if (chdir(working_dir_name) < 0) {
-                    fprintf(stderr, "failed to change dir to '%s': %s\n", working_dir_name, strerror(errno));
+            move_to_cgroup();
+            //setpgid(0, 0);
+            if (setsid() < 0) fprintf(stderr, "setsid() failed: %s\n", strerror(errno));
+            if (enable_sandbox_dir) {
+                if (chdir(sandbox_dir) < 0) {
+                    fprintf(stderr, "failed to change dir to %s: %s\n", sandbox_dir, strerror(errno));
+                    _exit(127);
+                }
+                if (working_dir_name && *working_dir_name) {
+                    if (chdir(working_dir_name) < 0) {
+                        fprintf(stderr, "failed to change dir to '%s': %s\n", working_dir_name, strerror(errno));
+                        _exit(127);
+                    }
+                }
+            } else if (working_dir && *working_dir) {
+                if (chdir(working_dir) < 0) {
+                    fprintf(stderr, "failed to change dir to %s: %s\n", working_dir, strerror(errno));
                     _exit(127);
                 }
             }
@@ -1707,7 +2173,7 @@ main(int argc, char *argv[])
                 umask(limit_umask & 0777);
             }
 
-            // not yet supported: RLIMIT_MEMLOCK, RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_RTPRIO, RLIMIT_SIGPENDING
+            /* not yet supported: RLIMIT_MEMLOCK, RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_RTPRIO, RLIMIT_SIGPENDING */
 
             if (enable_vm_limit > 0 && limit_vm_size > 0) {
                 struct rlimit lim = { .rlim_cur = limit_vm_size, .rlim_max = limit_vm_size };
@@ -1788,8 +2254,27 @@ main(int argc, char *argv[])
                 _exit(127);
             }
 
-            execve(start_program, start_args, environ);
-            fprintf(stderr, "failed to exec '%s': %s\n", start_program, strerror(errno));
+            if (prctl(PR_SET_NO_NEW_PRIVS, 1L, 0L, 0L, 0L) < 0) {
+                fprintf(stderr, "prctl failed: %s\n", strerror(errno));
+                _exit(127);
+            }
+
+            if (enable_seccomp) {
+                if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, seccomp_prog_active)) {
+                    fprintf(stderr, "seccomp loading failed: %s\n", strerror(errno));
+                    _exit(127);
+                }
+            }
+
+            if (bash_mode) {
+                printf("child: %d, %d, %d\n", getpid(), getppid(), tidptr);
+                printf("init success, starting /bin/bash\n");
+                execlp("/bin/bash", "/bin/bash", "-i", NULL);
+                fprintf(stderr, "failed to exec /bin/bash: %s\n", strerror(errno));
+            } else {
+                execve(start_program, start_args, environ);
+                fprintf(stderr, "failed to exec '%s': %s\n", start_program, strerror(errno));
+            }
 
             _exit(127);
         }
@@ -1839,6 +2324,14 @@ main(int argc, char *argv[])
         if (epoll_ctl(efd, EPOLL_CTL_ADD, tfd, &tee) < 0) {
             
             ffatal("failed epoll_ctl: %s", strerror(errno));
+        }
+
+        if (control_socket_fd >= 0) {
+            struct epoll_event ee = { .events = EPOLLIN, .data = { .fd = control_socket_fd } };
+            if (epoll_ctl(efd, EPOLL_CTL_ADD, control_socket_fd, &ee) < 0) {
+                
+                ffatal("failed epoll_ctl: %s", strerror(errno));
+            }
         }
 
         long clock_ticks = sysconf(_SC_CLK_TCK);
@@ -1955,6 +2448,27 @@ main(int argc, char *argv[])
                             }
                         }
                     }
+                } else if (control_socket_fd >= 0 && curev->data.fd == control_socket_fd) {
+                    uint32_t val;
+                    int r = read(control_socket_fd, &val, sizeof(val));
+                    if (r < 0) {
+                        
+                        ffatal("control socket read error: %s", strerror(errno));
+                    } else if (!r) {
+                        epoll_ctl(efd, EPOLL_CTL_DEL, control_socket_fd, NULL);
+                        close(control_socket_fd); control_socket_fd = -1;
+                    } else if (r != sizeof(val)) {
+                        
+                        ffatal("invalid control socket read: %d", r);
+                    } else {
+                        if ((val & 0xf0000000) == 0xe0000000) {
+                            uint32_t cmd = (val & 0x0fffff00) >> 8;
+                            if (cmd == 1) {
+                                // send signal
+                                kill(pid2, val & 0xff);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1965,10 +2479,19 @@ main(int argc, char *argv[])
         }
 
         int orphaned_processes = 0;
+        if (enable_prc_count) {
+            orphaned_processes = count_processes();
+        }
 
         
 
         int ipc_objects = 0;
+        if (enable_ipc_count) {
+            ipc_objects += scan_posix_mqueue(slave_uid);
+            ipc_objects += scan_msg(slave_uid);
+            ipc_objects += scan_sem(slave_uid);
+            ipc_objects += scan_shm(slave_uid);
+        }
 
         long long cpu_utime_us = prc_usage.ru_utime.tv_sec * 1000000LL + prc_usage.ru_utime.tv_usec;
         long long cpu_stime_us = prc_usage.ru_stime.tv_sec * 1000000LL + prc_usage.ru_stime.tv_usec;
@@ -1991,7 +2514,7 @@ main(int argc, char *argv[])
         if (!prc_time_exceeded && !prc_real_time_exceeded
             && enable_mem_limit_detect
             && limit_rss_size > 0
-            // && WIFSIGNALED(prc_status) && WTERMSIG(prc_status) == SIGKILL
+            /* && WIFSIGNALED(prc_status) && WTERMSIG(prc_status) == SIGKILL */
             && (long long) prc_usage.ru_maxrss * 1024 > limit_rss_size) {
             prc_out_of_memory = 1;
         }
@@ -2052,9 +2575,15 @@ main(int argc, char *argv[])
     if (stdout_fd >= 0) close(stdout_fd);
     if (stderr_fd >= 0) close(stderr_fd);
     stdin_fd = -1; stdout_fd = -1; stderr_fd = -1;
+    if (control_socket_fd >= 0) close(control_socket_fd);
+    control_socket_fd = -1;
 
     siginfo_t infop = {};
     waitid(P_PID, pid, &infop, WEXITED);
+    if (bash_mode) {
+        printf("bash finished\n");
+        printf("parent: %d, %d\n", pid, tidptr);
+    }
 
     change_ownership(primary_uid, primary_gid, slave_uid);
     if (cgroup_unified_path[0]) rmdir(cgroup_unified_path);

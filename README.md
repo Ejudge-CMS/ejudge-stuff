@@ -10,7 +10,7 @@
 
 ### Использование
 
-См. [инструкцию](https://ejudge.ru/wiki/index.php/Ej-suid-container).
+См. [инструкцию](https://ejudge.ru/wiki/index.php/Ej-suid-container). ЗАПЯТУЮ ПЕРЕД ПУТЁМ СТАВИТЬ НЕ НАДО! Также были выкинуты опции mo, mp, mg, mG, mC.
 
 ## Двойной запуск
 
