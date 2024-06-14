@@ -1406,36 +1406,36 @@ static struct sock_filter seccomp_filter_default[] =
 
     // blacklist non-readonly openat
 #if defined __NR_openat
-    /* 23 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_openat, 0, 3),
-    /* 24 */ BPF_STMT(BPF_LD+BPF_W+BPF_ABS, (offsetof(struct seccomp_data, args[2]))),
-    /* 25 */ BPF_STMT(BPF_ALU+BPF_AND+BPF_K, 07),
-    /* 26 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, 0, 1, 0),
-    /* 27 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS),
+    /* 21 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_openat, 0, 3),
+    /* 22 */ BPF_STMT(BPF_LD+BPF_W+BPF_ABS, (offsetof(struct seccomp_data, args[2]))),
+    /* 23 */ BPF_STMT(BPF_ALU+BPF_AND+BPF_K, 07),
+    /* 24 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, 0, 1, 0),
+    /* 25 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS),
 #else
+    /* 21 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+    /* 22 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
     /* 23 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
     /* 24 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
     /* 25 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
-    /* 26 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
-    /* 27 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
 #endif
 
     // blacklist non-readonly open
 #if defined __NR_open
-    /* 28 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_open, 0, 3),
-    /* 29 */ BPF_STMT(BPF_LD+BPF_W+BPF_ABS, (offsetof(struct seccomp_data, args[2]))),
-    /* 30 */ BPF_STMT(BPF_ALU+BPF_AND+BPF_K, 07),
-    /* 31 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, 0, 1, 0),
-    /* 32 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS),
+    /* 26 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_open, 0, 3),
+    /* 27 */ BPF_STMT(BPF_LD+BPF_W+BPF_ABS, (offsetof(struct seccomp_data, args[2]))),
+    /* 28 */ BPF_STMT(BPF_ALU+BPF_AND+BPF_K, 07),
+    /* 29 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, 0, 1, 0),
+    /* 30 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS),
 #else
+    /* 26 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
+    /* 27 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
     /* 28 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
     /* 29 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
     /* 30 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
-    /* 31 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
-    /* 32 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
 #endif
 
     // allow remaining
-    /* 33 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW),
+    /* 31 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW),
 };
 
 static __attribute__((unused)) struct sock_fprog seccomp_prog_default =
@@ -1503,8 +1503,6 @@ tune_seccomp()
         seccomp_filter_default[28] = nop[0];
         seccomp_filter_default[29] = nop[0];
         seccomp_filter_default[30] = nop[0];
-        seccomp_filter_default[31] = nop[0];
-        seccomp_filter_default[32] = nop[0];
     }
 }
 
