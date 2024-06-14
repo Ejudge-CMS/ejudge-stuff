@@ -1408,8 +1408,8 @@ static struct sock_filter seccomp_filter_default[] =
 #if defined __NR_openat
     /* 21 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_openat, 0, 3),
     /* 22 */ BPF_STMT(BPF_LD+BPF_W+BPF_ABS, (offsetof(struct seccomp_data, args[2]))),
-    /* 23 */ BPF_STMT(BPF_ALU+BPF_AND+BPF_K, 07),
-    /* 24 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, 0, 1, 0),
+    /* 23 */ BPF_STMT(BPF_ALU+BPF_OR+BPF_K, O_RDONLY|O_NONBLOCK|O_CLOEXEC),
+    /* 24 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, O_RDONLY|O_NONBLOCK|O_CLOEXEC, 1, 0),
     /* 25 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS),
 #else
     /* 21 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
