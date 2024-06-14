@@ -115,7 +115,6 @@ static int enable_sys_execve = 0;
 static int enable_sys_fork = 0;
 static int enable_sys_memfd = 0;
 static int enable_sys_unshare = 0;
-static int enable_fd_open = 0;
 
 static char *working_dir = NULL;
 static char *working_dir_parent = NULL;
@@ -1395,47 +1394,8 @@ static struct sock_filter seccomp_filter_default[] =
     /* 18 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
 #endif
 
-    // blacklist creat
-#if defined __NR_creat
-    /* 19 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_creat, 0, 1),
-    /* 20 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS),
-#else
-    /* 19 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
-    /* 20 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
-#endif
-
-    // blacklist non-readonly openat
-#if defined __NR_openat
-    /* 21 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_openat, 0, 3),
-    /* 22 */ BPF_STMT(BPF_LD+BPF_W+BPF_ABS, (offsetof(struct seccomp_data, args[2]))),
-    /* 23 */ BPF_STMT(BPF_ALU+BPF_OR+BPF_K, O_RDONLY|O_NONBLOCK|O_CLOEXEC),
-    /* 24 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, O_RDONLY|O_NONBLOCK|O_CLOEXEC, 1, 0),
-    /* 25 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS),
-#else
-    /* 21 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
-    /* 22 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
-    /* 23 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
-    /* 24 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
-    /* 25 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
-#endif
-
-    // blacklist non-readonly open
-#if defined __NR_open
-    /* 26 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_open, 0, 3),
-    /* 27 */ BPF_STMT(BPF_LD+BPF_W+BPF_ABS, (offsetof(struct seccomp_data, args[2]))),
-    /* 28 */ BPF_STMT(BPF_ALU+BPF_AND+BPF_K, 07),
-    /* 29 */ BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, 0, 1, 0),
-    /* 30 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL_PROCESS),
-#else
-    /* 26 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
-    /* 27 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
-    /* 28 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
-    /* 29 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
-    /* 30 */ BPF_JUMP(BPF_JMP+BPF_JA, 0, 0, 0),
-#endif
-
     // allow remaining
-    /* 31 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW),
+    /* 19 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW),
 };
 
 static __attribute__((unused)) struct sock_fprog seccomp_prog_default =
@@ -1489,20 +1449,6 @@ tune_seccomp()
     if (enable_sys_unshare) {
         seccomp_filter_default[17] = nop[0];
         seccomp_filter_default[18] = nop[0];
-    }
-    if (enable_fd_open) {
-        seccomp_filter_default[19] = nop[0];
-        seccomp_filter_default[20] = nop[0];
-        seccomp_filter_default[21] = nop[0];
-        seccomp_filter_default[22] = nop[0];
-        seccomp_filter_default[23] = nop[0];
-        seccomp_filter_default[24] = nop[0];
-        seccomp_filter_default[25] = nop[0];
-        seccomp_filter_default[26] = nop[0];
-        seccomp_filter_default[27] = nop[0];
-        seccomp_filter_default[28] = nop[0];
-        seccomp_filter_default[29] = nop[0];
-        seccomp_filter_default[30] = nop[0];
     }
 }
 
@@ -1959,9 +1905,6 @@ main(int argc, char *argv[])
                 opt += 2;
             } else if (*opt == 's' && opt[1] == 'f') {
                 enable_sys_fork = 1;
-                opt += 2;
-            } else if (*opt == 's' && opt[1] == 'd') {
-                enable_fd_open = 1;
                 opt += 2;
             } else if (*opt == 's' && opt[1] == 'm') {
                 enable_sys_memfd = 1;
