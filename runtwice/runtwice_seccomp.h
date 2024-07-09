@@ -62,9 +62,9 @@ static char program_name[PATH_MAX] = "";
     /* 28 */ BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW), \
 }
 
-#define seccomp_prog(filter) { \
-    .len = (unsigned short)(sizeof(filter) / sizeof(filter[0])), \
-    .filter = filter, \
+#define seccomp_prog(flt) { \
+    .len = (unsigned short)(sizeof(flt) / sizeof(flt[0])), \
+    .filter = flt, \
 }
 
 #define setup_filter() prctl(PR_SET_NO_NEW_PRIVS, 1L, 0L, 0L, 0L)
