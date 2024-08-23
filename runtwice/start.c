@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <linux/sched.h>
 #include <stdio.h>
 #include <string.h>
@@ -15,6 +16,12 @@
 #include <stddef.h>
 #include <linux/limits.h>
 #include <stdint.h>
+
+#define PIPESZ 1000000
+
+#ifndef INPUTFILE
+#define INPUTFILE "input"
+#endif
 
 static char program_name[PATH_MAX] = "";
 
@@ -70,3 +77,79 @@ static char program_name[PATH_MAX] = "";
 #define setup_filter() prctl(PR_SET_NO_NEW_PRIVS, 1L, 0L, 0L, 0L)
 
 #define install_filter(prog) prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)
+
+static int out;
+static int tin[2];
+static int tout[2];
+
+static int status;
+static pid_t pid;
+
+void prepare(int *pp) {
+    fcntl(pp[1], F_SETPIPE_SZ, PIPESZ);
+}
+
+void clearpipe(int *pp) {
+    close(pp[0]); close(pp[1]);
+    pipe2(pp, O_NONBLOCK | O_CLOEXEC);
+}
+
+void process_input();
+
+void process_first_run();
+
+void process_final();
+
+int main(int argc, char* argv[]) {
+
+    setup_filter();
+    snprintf(program_name, sizeof(program_name), "%s", argv[1]);
+
+    struct sock_filter filter[] = seccomp_fiter(program_name);
+    struct sock_fprog prog = seccomp_prog(filter);
+
+    out = dup(STDOUT_FILENO);
+
+    pipe2(tin, O_NONBLOCK | O_CLOEXEC); prepare(tin);
+    pipe2(tout, O_NONBLOCK | O_CLOEXEC); prepare(tout);
+    
+    dup2(tin[1], STDOUT_FILENO);
+    process_input();
+    fflush(stdin); fflush(stdout);
+
+    unlink(INPUTFILE);
+
+    pid = fork();
+    if (!pid) {
+        dup2(tin[0], STDIN_FILENO);
+        dup2(tout[1], STDOUT_FILENO);
+        install_filter(prog);
+        execve(program_name, NULL, NULL);
+    }
+
+    waitpid(pid, &status, 0);
+    if (status) _exit(127);
+    
+    clearpipe(tin);
+    dup2(tout[0], STDIN_FILENO); dup2(tin[1], STDOUT_FILENO);
+    process_first_run();
+    fflush(stdin); fflush(stdout);
+    clearpipe(tout);
+
+    pid = fork();
+    if (!pid) {
+        dup2(tin[0], STDIN_FILENO);
+        dup2(tout[1], STDOUT_FILENO);
+	    install_filter(prog);
+        execve(program_name, NULL, NULL);
+    }
+
+    waitpid(pid, &status, 0);
+    if (status) _exit(127);
+
+    dup2(tout[0], STDIN_FILENO); dup2(out, STDOUT_FILENO);
+    process_final();
+    fflush(stdin); fflush(stdout);
+
+    close(tin[0]); close(tout[0]); close(tin[1]); close(tout[1]); close(out);
+}
