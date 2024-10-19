@@ -1,5 +1,4 @@
 #include <asm/unistd.h>
-#include <errno.h>
 #include <fcntl.h>
 #include <linux/filter.h>
 #include <linux/limits.h>
@@ -10,14 +9,11 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
-#include <string>
 
 #ifndef INPUTFILE
 #define INPUTFILE "input"
@@ -86,7 +82,7 @@ void process_input();
 
 void process_first_run();
 
-void process_second_run();
+void process_final();
 
 int main(int argc, char *argv[]) {
 
@@ -174,7 +170,7 @@ int main(int argc, char *argv[]) {
     lseek(mfd[1][1], 0, SEEK_SET);
     dup2(mfd[1][1], STDIN_FILENO);
     dup2(out, STDOUT_FILENO);
-    process_second_run();
+    process_final();
     fflush(stdout);
 
     // Fd closing
