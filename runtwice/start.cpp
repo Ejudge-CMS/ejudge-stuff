@@ -1,4 +1,6 @@
 #include <asm/unistd.h>
+#include <cstdint>
+#include <ctime>
 #include <fcntl.h>
 #include <linux/filter.h>
 #include <linux/limits.h>
@@ -9,15 +11,13 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
-
-#ifndef INPUTFILE
-#define INPUTFILE "input"
-#endif
 
 #define seccomp_fiter(prog_name) {                                                         \
     BPF_STMT(BPF_LD + BPF_W + BPF_ABS, (offsetof(struct seccomp_data, nr))),               \
@@ -51,7 +51,7 @@
                                                                                            \
     /* 19 */ BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_execve, 0, 3),                       \
     /* 20 */ BPF_STMT(BPF_LD + BPF_W + BPF_ABS, (offsetof(struct seccomp_data, args[0]))), \
-    /* 21 */ BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, (uintptr_t)prog_name, 1, 0),              \
+    /* 21 */ BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, (uint32_t)(uintptr_t)prog_name, 1, 0),              \
     /* 22 */ BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_KILL_PROCESS),                          \
                                                                                            \
     /* 23 */ BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_openat, 0, 4),                       \
@@ -74,9 +74,12 @@
 
 extern char **environ;
 static char program_name[PATH_MAX];
+static char input_name[PATH_MAX] = "input";
+static clock_t tl[2];
 static int out, mfd[2][2];
 static pid_t pid;
 static int status;
+clock_t ttime;
 
 void process_input();
 
@@ -88,7 +91,22 @@ int main(int argc, char *argv[]) {
 
     // Argparsing
 
-    snprintf(program_name, sizeof(program_name), "%s", argv[1]);
+    sprintf(program_name, "%s", argv[1]);
+
+    // Envparsing
+
+    tl[0] = tl[1] = 1000;
+    for (int i = 0; environ[i]; ++i) {
+        if (strncmp("INPUT=", environ[i], 6)) {
+            sprintf(input_name, "%s", environ[i] + 6);
+        } else if (strncmp("FTL=", environ[i], 4)) {
+            tl[0] = atoi(environ[i] + 4);
+            if (tl[0] == 0) tl[0] = 1000;
+        } else if (strncmp("STL=", environ[i], 4)) {
+            tl[1] = atoi(environ[i] + 4);
+            if (tl[1] == 0) tl[1] = 1000;
+        }
+    }
 
     // Filter setup
 
@@ -112,11 +130,12 @@ int main(int argc, char *argv[]) {
     fflush(stdin);
     dup2(mfd[0][0], STDOUT_FILENO);
     process_input();
-    unlink(INPUTFILE);
+    unlink(input_name);
     fflush(stdout);
 
     // First run
 
+    ttime = clock();
     pid = fork();
     if (!pid) {
         lseek(mfd[0][0], 0, SEEK_SET);
@@ -125,11 +144,15 @@ int main(int argc, char *argv[]) {
         freopen("/dev/null", "w", stderr);
         close(out);
         install_filter(prog);
-        execve(program_name, argv + 1, environ);
+        execv(program_name, argv + 1);
         fprintf(stderr, "Failed to invoke first run.");
         _exit(127);
     }
     waitpid(pid, &status, 0);
+    if (clock() - ttime > tl[0]) {
+        fprintf(stderr, "First run time limit exceeded.");
+        _exit(127);
+    }
     if (status) {
         fprintf(stderr, "First run has exited with code %d.", WTERMSIG(status));
         _exit(127);
@@ -146,6 +169,7 @@ int main(int argc, char *argv[]) {
 
     // Second run
 
+    ttime = clock();
     pid = fork();
     if (!pid) {
         lseek(mfd[1][0], 0, SEEK_SET);
@@ -154,11 +178,15 @@ int main(int argc, char *argv[]) {
         freopen("/dev/null", "w", stderr);
         close(out);
         install_filter(prog);
-        execve(program_name, argv + 1, environ);
+        execv(program_name, argv + 1);
         fprintf(stderr, "Failed to invoke second run.");
         _exit(127);
     }
     waitpid(pid, &status, 0);
+    if (clock() - ttime > tl[1]) {
+        fprintf(stderr, "Second run time limit exceeded.");
+        _exit(127);
+    }
     if (status) {
         fprintf(stderr, "Second run has exited with code %d.", WTERMSIG(status));
         _exit(127);
